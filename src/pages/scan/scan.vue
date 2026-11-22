@@ -21,13 +21,34 @@
             </div>
 
             <div class="side">
-                <div v-if="parsed" class="result">
-                    <text class="result-flag">识别成功</text>
+                <div v-if="parsedList.length > 1" class="result">
+                    <text class="result-flag">{{ resultFlagText }}</text>
+                    <text class="result-batch-title">共 {{ parsedList.length }} 个账号（可新增 {{ newCount }} 个{{ dupCount ? ' · 已存在 ' + dupCount + ' 个' : '' }}）</text>
+                    <scroller class="mig-list" scroll-direction="vertical" show-scrollbar="false">
+                        <div class="mig-list-inner">
+                            <div v-for="(item, idx) in parsedList" :key="idx" class="mig-row">
+                                <text class="mig-name">{{ itemTitle(item) }}</text>
+                                <text class="mig-tag" :class="{ 'mig-tag-dup': isDup(item) }">{{ isDup(item) ? '已存在' : (item.type === 'hotp' ? 'HOTP' : item.digits + '位') }}</text>
+                            </div>
+                        </div>
+                    </scroller>
+                    <div class="actions">
+                        <text v-if="hasMoreBatches" class="btn-primary" @click="confirmAdd(true)">添加并扫下一张</text>
+                        <text class="btn-primary" v-else @click="confirmAdd(false)">{{ newCount > 0 ? '全部添加 (' + newCount + ')' : '全部已存在' }}</text>
+                        <text v-if="hasMoreBatches" class="btn-ghost" @click="confirmAdd(false)">添加并完成</text>
+                        <text class="btn-ghost" @click="rescan">重扫</text>
+                    </div>
+                </div>
+
+                <div v-else-if="parsed" class="result">
+                    <text class="result-flag">{{ resultFlagText }}</text>
                     <text class="result-name">{{ parsed.issuer || parsed.account || '未命名' }}</text>
-                    <text class="result-sub">{{ parsed.account || '（无账号名）' }} · {{ parsed.algorithm }} · {{ parsed.digits }} 位 · {{ parsed.period }}s</text>
+                    <text class="result-sub">{{ parsed.account || '（无账号名）' }} · {{ parsed.algorithm }} · {{ parsed.digits }} 位 · {{ parsed.type === 'hotp' ? 'HOTP' : parsed.period + 's' }}</text>
                     <text class="result-secret">密钥 {{ masked }}</text>
                     <div class="actions">
-                        <text class="btn-primary" @click="confirmAdd">添加到验证器</text>
+                        <text v-if="hasMoreBatches" class="btn-primary" @click="confirmAdd(true)">添加并扫下一张</text>
+                        <text v-else class="btn-primary" @click="confirmAdd(false)">添加到验证器</text>
+                        <text v-if="hasMoreBatches" class="btn-ghost" @click="confirmAdd(false)">添加并完成</text>
                         <text class="btn-ghost" @click="rescan">重新扫描</text>
                     </div>
                 </div>
@@ -35,6 +56,7 @@
                 <div v-else class="tips">
                     <text class="tip-title">{{ statusTitle }}</text>
                     <text class="tip">{{ statusSub }}</text>
+                    <text class="tip-sub">支持普通 2FA 二维码与 Google 验证器「转移账号」二维码（多账号转移建议每次选 1-4 个导出）</text>
                     <div class="actions">
                         <text v-if="camFailed || timedOut" class="btn-primary" @click="retryCamera">重试</text>
                         <text class="btn-ghost" @click="goManual">手动输入</text>
@@ -52,7 +74,7 @@
 import fs from 'fs'
 import globalModule from 'global'
 import { vault } from '../../lib/vault.js'
-import { parseOtpInput, extractUris } from '../../lib/otpauth.js'
+import { parseOtpInputs, extractUris } from '../../lib/otpauth.js'
 import { bytesToBase64, base64ToBytesAsync, utf8 } from '../../lib/bytes.js'
 import { decodeQr, grayToBitsAsync } from '../../lib/qrdec.js'
 import {
@@ -89,6 +111,12 @@ export default {
             statusSub: '笔头离屏幕 5-10cm，二维码占满取景框',
             statusShort: '识别中',
             parsed: null,
+            parsedList: [],
+            isMigration: false,
+            batchSize: 1,
+            batchIndex: 0,
+            batchId: 0,
+            scannedBatches: {},
             banner: '',
             camFailed: false,
             timedOut: false
@@ -99,6 +127,34 @@ export default {
             const secret = (this.parsed && this.parsed.secret) || ''
             if (secret.length <= 8) return secret
             return secret.slice(0, 4) + ' ···· ' + secret.slice(-4)
+        },
+        resultFlagText() {
+            if (!this.isMigration) return '识别成功'
+            if (this.batchSize > 1) {
+                return `Google 转移码 · 第 ${this.batchIndex + 1}/${this.batchSize} 张`
+            }
+            return 'Google 转移码 · 识别成功'
+        },
+        newCount() {
+            let count = 0
+            const seen = {}
+            for (let i = 0; i < this.parsedList.length; i++) {
+                const s = this.parsedList[i].secret
+                if (!seen[s] && !vault.hasDuplicate(s)) {
+                    seen[s] = true
+                    count++
+                }
+            }
+            return count
+        },
+        dupCount() {
+            return Math.max(0, this.parsedList.length - this.newCount)
+        },
+        hasMoreBatches() {
+            if (!this.isMigration || this.batchSize <= 1) return false
+            const doneCount = Object.keys(this.scannedBatches).length
+            const already = !!this.scannedBatches[this.batchIndex]
+            return (doneCount + (already ? 0 : 1)) < this.batchSize
         }
     },
     mounted() {
@@ -117,6 +173,15 @@ export default {
         this.teardown()
     },
     methods: {
+        isDup(item) {
+            return !!(item && vault.hasDuplicate(item.secret))
+        },
+        itemTitle(item) {
+            const issuer = item.issuer || ''
+            const account = item.account || ''
+            if (issuer && account) return issuer + ' (' + account + ')'
+            return issuer || account || '未命名'
+        },
         async boot() {
             this.camFailed = false
             this.timedOut = false
@@ -287,17 +352,26 @@ export default {
         },
         onResult(text) {
             const uris = extractUris(text)
-            const candidate = uris.length ? uris[0] : (/otpauth:\/\//i.test(text) ? text : '')
-            if (!candidate) {
+            const hasOtpScheme = uris.length > 0 || /^otpauth(?:-migration)?:\/\//i.test(String(text || '').trim())
+            if (!hasOtpScheme) {
                 // 扫到别的二维码（网址、名片…）时提示一下，继续扫
                 this.statusTitle = '识别到内容，但不是验证器二维码'
                 this.statusSub = String(text).slice(0, 60)
                 return
             }
             try {
-                this.parsed = parseOtpInput(candidate)
+                const res = parseOtpInputs(text)
+                if (res.isMigration && this.batchId && res.batchId && res.batchId !== this.batchId) {
+                    this.scannedBatches = {}
+                }
+                this.parsedList = res.accounts
+                this.parsed = res.accounts[0] || null
+                this.isMigration = !!res.isMigration
+                this.batchSize = res.batchSize || 1
+                this.batchIndex = res.batchIndex || 0
+                this.batchId = res.batchId || 0
                 this.statusShort = '已识别'
-                this.statusTitle = '识别成功'
+                this.statusTitle = res.isMigration ? 'Google 转移码识别成功' : '识别成功'
                 this.statusSub = '确认后添加到验证器'
                 // 识别成功就不再占相机，省电；点「重新扫描」会重新拉起
                 this.stopCamera()
@@ -308,6 +382,7 @@ export default {
         },
         async rescan() {
             this.parsed = null
+            this.parsedList = []
             this.statusTitle = '把二维码放进取景框'
             this.statusSub = '笔头离屏幕 5-10cm，二维码占满取景框'
             this.statusShort = '识别中'
@@ -335,17 +410,52 @@ export default {
                 this.g.execShell(stopFeedCmd(CAM_DIR))
             } catch (e) { /* 忽略 */ }
         },
-        async confirmAdd() {
-            if (!this.parsed) return
-            if (vault.hasDuplicate(this.parsed.secret)) {
-                this.setBanner('该密钥已存在')
-                return
-            }
+        async confirmAdd(continueNext = false) {
+            if (!this.parsedList.length && !this.parsed) return
+            const list = this.parsedList.length ? this.parsedList : [this.parsed]
             try {
-                await vault.add(this.parsed)
-                this.parsed = null
-                this.setBanner('已添加', 1200)
-                setTimeout(() => this.close(), 600)
+                if (list.length === 1) {
+                    const item = list[0]
+                    if (vault.hasDuplicate(item.secret)) {
+                        if (continueNext) {
+                            this.scannedBatches = Object.assign({}, this.scannedBatches, { [this.batchIndex]: true })
+                            this.setBanner('该账号已存在，请继续扫描下一张')
+                            await this.rescan()
+                            return
+                        }
+                        this.setBanner('该密钥已存在')
+                        return
+                    }
+                    await vault.add(item)
+                    if (continueNext) {
+                        this.scannedBatches = Object.assign({}, this.scannedBatches, { [this.batchIndex]: true })
+                        const done = Object.keys(this.scannedBatches).length
+                        this.setBanner(`已添加 1 个账号（批次 ${done}/${this.batchSize}），请扫下一张`, 2400)
+                        await this.rescan()
+                        return
+                    }
+                    this.parsed = null
+                    this.parsedList = []
+                    this.setBanner('已添加', 1200)
+                    setTimeout(() => this.close(), 600)
+                } else {
+                    const { added, skipped } = await vault.addMany(list)
+                    if (added === 0 && !continueNext) {
+                        this.setBanner(`全部 ${skipped} 个账号均已存在`)
+                        return
+                    }
+                    if (continueNext) {
+                        this.scannedBatches = Object.assign({}, this.scannedBatches, { [this.batchIndex]: true })
+                        const done = Object.keys(this.scannedBatches).length
+                        this.setBanner(`已添加 ${added} 个（跳过 ${skipped} 个），批次 ${done}/${this.batchSize}，请扫下一张`, 2600)
+                        await this.rescan()
+                        return
+                    }
+                    this.parsed = null
+                    this.parsedList = []
+                    this.setBanner(`已添加 ${added} 个账号` + (skipped ? `（跳过重复 ${skipped} 个）` : ''), 1400)
+                    setTimeout(() => this.close(), 700)
+                }
             } catch (e) {
                 this.setBanner('添加失败：' + e.message)
             }
@@ -521,6 +631,12 @@ export default {
     margin-top: 5px;
 }
 
+.tip-sub {
+    font-size: 11px;
+    color: #8a8f98;
+    margin-top: 6px;
+}
+
 .result {
     flex: 1;
     flex-direction: column;
@@ -533,6 +649,13 @@ export default {
 
 .result-name {
     font-size: 18px;
+    color: #1b1c1e;
+    font-weight: bold;
+    margin-top: 2px;
+}
+
+.result-batch-title {
+    font-size: 14px;
     color: #1b1c1e;
     font-weight: bold;
     margin-top: 2px;
@@ -551,6 +674,46 @@ export default {
     margin-top: 6px;
 }
 
+.mig-list {
+    flex: 1;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+}
+
+.mig-list-inner {
+    flex-direction: column;
+    padding: 4px 6px;
+}
+
+.mig-row {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 2px;
+}
+
+.mig-name {
+    flex: 1;
+    font-size: 12px;
+    color: #1b1c1e;
+}
+
+.mig-tag {
+    font-size: 10px;
+    color: #1a73e8;
+    background-color: #eaf1fd;
+    padding: 1px 6px;
+    border-radius: 8px;
+    margin-left: 6px;
+}
+
+.mig-tag-dup {
+    color: #8a8f98;
+    background-color: #e8eaed;
+}
+
 .actions {
     flex-direction: row;
     margin-top: auto;
@@ -560,18 +723,18 @@ export default {
     font-size: 13px;
     color: #ffffff;
     background-color: #1a73e8;
-    padding: 7px 16px;
+    padding: 7px 14px;
     border-radius: 16px;
-    margin-right: 8px;
+    margin-right: 6px;
 }
 
 .btn-ghost {
     font-size: 13px;
     color: #5f6368;
     background-color: #f1f3f4;
-    padding: 7px 14px;
+    padding: 7px 12px;
     border-radius: 16px;
-    margin-right: 8px;
+    margin-right: 6px;
 }
 
 .banner {

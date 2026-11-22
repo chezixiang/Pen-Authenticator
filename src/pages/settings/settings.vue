@@ -26,7 +26,14 @@
             </div>
 
             <div class="card">
-                <text class="card-title">备份</text>
+                <text class="card-title">备份与 Google 转移</text>
+                <div class="item" @click="openMigrationQr">
+                    <div class="item-text">
+                        <text class="item-name">Google 转移二维码</text>
+                        <text class="item-sub">生成转移码，用手机 Google 验证器扫码导入</text>
+                    </div>
+                    <text class="chev">›</text>
+                </div>
                 <div class="item" @click="exportBackup">
                     <div class="item-text">
                         <text class="item-name">导出到文件</text>
@@ -36,7 +43,7 @@
                 </div>
                 <div class="item" @click="importBackup">
                     <div class="item-text">
-                        <text class="item-name">从 import.txt 导入</text>
+                        <text class="item-name">从文件导入</text>
                         <text class="item-sub">{{ importHint }}</text>
                     </div>
                     <text class="chev">›</text>
@@ -48,7 +55,30 @@
                 <div class="item">
                     <div class="item-text">
                         <text class="item-name">Authenticator for 有道词典笔</text>
-                        <text class="item-sub">支持 TOTP/HOTP · SHA1/256/512 · 本地加密 · 扫码或手输</text>
+                        <text class="item-sub">支持 TOTP/HOTP · Google 2FA 转移 · 本地加密 · 扫码/文件导入</text>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="qr-mask" v-if="qrModal">
+            <div class="qr-box">
+                <div class="qr-left">
+                    <image v-if="qrImageSrc" class="qr-img" :src="qrImageSrc" resize="contain" />
+                </div>
+                <div class="qr-right">
+                    <text class="qr-flag">Google 验证器转移导出 · 第 {{ qrIndex + 1 }}/{{ qrUris.length }} 张</text>
+                    <text class="qr-title">手机打开 Google 验证器 → 转移账号 → 导入账号</text>
+                    <text class="qr-sub">本张包含 {{ currentQrChunk.length }} 个账号（共 {{ totalExportCount }} 个）：</text>
+                    <scroller class="qr-list" scroll-direction="vertical" show-scrollbar="false">
+                        <div class="qr-list-inner">
+                            <text v-for="(acc, i) in currentQrChunk" :key="i" class="qr-acc">· {{ acc.issuer || acc.account || '未命名' }}{{ acc.issuer && acc.account ? ' (' + acc.account + ')' : '' }}</text>
+                        </div>
+                    </scroller>
+                    <div class="qr-actions">
+                        <text v-if="qrUris.length > 1" class="qr-btn" @click="stepQr(-1)">上一张</text>
+                        <text v-if="qrUris.length > 1" class="qr-btn-primary" @click="stepQr(1)">下一张</text>
+                        <text class="qr-btn" @click="closeMigrationQr">关闭</text>
                     </div>
                 </div>
             </div>
@@ -73,26 +103,51 @@
 
 <script>
 import { vault } from '../../lib/vault.js'
-import { buildOtpUri, extractUris, parseOtpInput } from '../../lib/otpauth.js'
-import { utf8, bytesToBase64 } from '../../lib/bytes.js'
+import { buildOtpUri, buildMigrationUris, extractUris, parseOtpInputs } from '../../lib/otpauth.js'
+import { qrToPngBase64 } from '../../lib/qrenc.js'
+import { decodeQr, grayToBits } from '../../lib/qrdec.js'
+import { utf8, bytesToBase64, base64ToBytes } from '../../lib/bytes.js'
 import fs from 'fs'
 import globalModule from 'global'
 
 const EXPORT_DIR = '/userdisk/Authenticator'
-const IMPORT_PATH = EXPORT_DIR + '/import.txt'
+// ydpen-toolkit 约定：/userdisk/Favorite 在 MTP 与文件管理器（8080 文件互传）中直接可见
+const FAV_DIR = '/userdisk/Favorite/Authenticator'
+const IMPORT_TEXT_CANDIDATES = [
+    EXPORT_DIR + '/import.txt',
+    FAV_DIR + '/import.txt',
+    '/userdisk/Favorite/import.txt'
+]
+const IMPORT_IMG_CANDIDATES = [
+    EXPORT_DIR + '/import.png',
+    EXPORT_DIR + '/import.jpg',
+    EXPORT_DIR + '/qr.png',
+    EXPORT_DIR + '/qr.jpg',
+    FAV_DIR + '/import.png',
+    FAV_DIR + '/import.jpg',
+    FAV_DIR + '/qr.png',
+    FAV_DIR + '/qr.jpg'
+]
+const QR_BATCH_LIMIT = 3
 
 export default {
     name: 'settings',
     data() {
         return {
             hasPin: false,
-            version: '1.0.0',
+            version: '1.1.0',
             banner: '',
-            exportHint: '生成 otpauth 链接文件，可用 SSH 取走',
-            importHint: '逐行写入 import.txt 后点此导入',
+            exportHint: '生成 otpauth 与 Google 转移文件（MTP/SSH 可取）',
+            importHint: '支持 import.txt (含 Google 转移链接) 或二维码图片',
             pinStage: '',
             pinBuffer: '',
-            pinFirst: ''
+            pinFirst: '',
+            qrModal: false,
+            qrUris: [],
+            qrChunks: [],
+            qrIndex: 0,
+            qrImageSrc: '',
+            totalExportCount: 0
         }
     },
     computed: {
@@ -100,6 +155,9 @@ export default {
             let text = ''
             for (let i = 0; i < 6; i++) text += i < this.pinBuffer.length ? '● ' : '○ '
             return text
+        },
+        currentQrChunk() {
+            return this.qrChunks[this.qrIndex] || []
         }
     },
     mounted() {
@@ -123,7 +181,7 @@ export default {
             this._bannerTimer = setTimeout(() => { this.banner = '' }, delay)
         },
         toast(text) {
-            this.setBanner(text, 2000)
+            this.setBanner(text, 2200)
         },
         async togglePin() {
             if (!vault.unlocked) {
@@ -177,59 +235,175 @@ export default {
             vault.lock()
             $falcon.navTo('unlock')
         },
+        async openMigrationQr() {
+            const items = vault.list()
+            if (!items.length) {
+                this.toast('没有可导出的账号')
+                return
+            }
+            try {
+                const chunks = []
+                for (let i = 0; i < items.length; i += QR_BATCH_LIMIT) {
+                    chunks.push(items.slice(i, i + QR_BATCH_LIMIT))
+                }
+                const uris = buildMigrationUris(items, QR_BATCH_LIMIT)
+                this.qrChunks = chunks
+                this.qrUris = uris
+                this.qrIndex = 0
+                this.totalExportCount = items.length
+                this.qrModal = true
+                await this.renderCurrentQr()
+            } catch (e) {
+                this.toast('生成转移二维码失败：' + e.message)
+            }
+        },
+        async stepQr(delta) {
+            if (!this.qrUris.length) return
+            const len = this.qrUris.length
+            this.qrIndex = (this.qrIndex + delta + len) % len
+            await this.renderCurrentQr()
+        },
+        async renderCurrentQr() {
+            const uri = this.qrUris[this.qrIndex]
+            if (!uri) return
+            const b64 = qrToPngBase64(uri, { targetSize: 192, ecLevel: 'M' })
+            // 每次使用带时间戳的新文件名，绕开 Falcon 框架的图片 URL 缓存（见 ydpen-toolkit 07 §6）
+            const tmpPath = `/tmp/auth_mig_${Date.now()}_${this.qrIndex}.png`
+            try {
+                const g = new globalModule.Global()
+                g.execShell(`echo '${b64}' | base64 -d > ${tmpPath}`)
+                await new Promise(r => setTimeout(r, 120))
+                if (await fs.exists(tmpPath)) {
+                    this.qrImageSrc = 'file://' + tmpPath
+                    return
+                }
+            } catch (e) { /* 浏览器预览环境回退到 data URI */ }
+            this.qrImageSrc = 'data:image/png;base64,' + b64
+        },
+        closeMigrationQr() {
+            this.qrModal = false
+            this.qrImageSrc = ''
+            try {
+                const g = new globalModule.Global()
+                g.execShell('rm -f /tmp/auth_mig_*.png')
+            } catch (e) { /* 忽略 */ }
+        },
+        async writeTextFile(path, text) {
+            // 优先支持 ydpen-toolkit 自研 fs 插件的 writeFile，同时保留 execShell 写盘与浏览器 mock
+            if (typeof fs.writeFile === 'function') {
+                try {
+                    const dir = path.slice(0, path.lastIndexOf('/'))
+                    if (dir && typeof fs.mkdir === 'function') await fs.mkdir(dir)
+                    await fs.writeFile(path, text)
+                    if (await fs.exists(path)) return true
+                } catch (e) { /* 回退到 execShell */ }
+            }
+            if (typeof fs._writeFile === 'function') {
+                try {
+                    await fs._writeFile(path, text)
+                    if (await fs.exists(path)) return true
+                } catch (e) { /* 忽略 */ }
+            }
+            const b64 = bytesToBase64(utf8(text))
+            const dir = path.slice(0, path.lastIndexOf('/'))
+            const g = new globalModule.Global()
+            g.execShell(`mkdir -p "${dir}" && echo '${b64}' | base64 -d > "${path}"`)
+            return true
+        },
         async exportBackup() {
             const items = vault.list()
             if (!items.length) {
                 this.toast('没有可导出的账号')
                 return
             }
-            const text = items.map(buildOtpUri).join('\n') + '\n'
-            const b64 = bytesToBase64(utf8(text))
+            const otpLines = items.map(buildOtpUri).join('\n') + '\n'
+            const migLines = buildMigrationUris(items, 10).join('\n') + '\n'
             const stamp = this.stamp()
-            const path = `${EXPORT_DIR}/backup-${stamp}.txt`
-            const g = new globalModule.Global()
+            const mainPath = `${EXPORT_DIR}/backup-${stamp}.txt`
+            const migPath = `${EXPORT_DIR}/migration-${stamp}.txt`
+            const favBackupPath = `${FAV_DIR}/backup-${stamp}.txt`
+            const favMigPath = `${FAV_DIR}/migration-${stamp}.txt`
             try {
-                g.execShell(`mkdir -p ${EXPORT_DIR} && echo '${b64}' | base64 -d > ${path}`)
-                await new Promise(r => setTimeout(r, 700))
-                const exists = await fs.exists(path)
+                await this.writeTextFile(mainPath, otpLines)
+                await this.writeTextFile(migPath, migLines)
+                await this.writeTextFile(favBackupPath, otpLines)
+                await this.writeTextFile(favMigPath, migLines)
+                await new Promise(r => setTimeout(r, 500))
+                const exists = (await fs.exists(mainPath)) || (await fs.exists(favBackupPath))
                 if (exists) {
-                    this.exportHint = `已导出 ${items.length} 个账号：${path}`
-                    this.toast('已导出：' + path)
+                    this.exportHint = `已导出 ${items.length} 个账号（含 Google 转移链接）`
+                    this.toast(`已导出到 ${FAV_DIR} 与 ${EXPORT_DIR}`)
                 } else {
-                    this.toast('导出命令已提交，请稍后到 ' + path + ' 查看')
+                    this.toast('导出命令已提交，请到 ' + FAV_DIR + ' 查看')
                 }
             } catch (e) {
                 this.toast('导出失败：' + e.message)
             }
         },
+        async importFromImage(imgPath) {
+            const side = 360
+            const grayPath = '/tmp/auth_imp.gray'
+            const b64Path = '/tmp/auth_imp.b64'
+            const g = new globalModule.Global()
+            g.execShell(
+                `rm -f ${grayPath} ${b64Path}; ` +
+                `ffmpeg -y -i "${imgPath}" -vf "scale=${side}:${side}:force_original_aspect_ratio=decrease,pad=${side}:${side}:(ow-iw)/2:(oh-ih)/2:white" -vframes 1 -f rawvideo -pix_fmt gray ${grayPath} >/dev/null 2>&1 && ` +
+                `base64 -w0 ${grayPath} > ${b64Path}`
+            )
+            const deadline = Date.now() + 6500
+            while (Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 250))
+                if (await fs.exists(b64Path)) {
+                    const b64 = String((await fs.readFile(b64Path)) || '').trim()
+                    if (b64.length > 4096) {
+                        const gray = base64ToBytes(b64)
+                        if (gray.length >= side * side) {
+                            const bits = grayToBits(gray, side, side)
+                            const r = decodeQr(bits)
+                            if (r && r.text) return r.text
+                        }
+                    }
+                    break
+                }
+            }
+            throw new Error('未能从图片中识别出二维码')
+        },
         async importBackup() {
             try {
-                const exists = await fs.exists(IMPORT_PATH)
-                if (!exists) {
-                    this.toast('未找到 ' + IMPORT_PATH + '，请先用 SSH 放入文件')
-                    return
-                }
-                const text = await fs.readFile(IMPORT_PATH)
-                const uris = extractUris(text)
-                if (!uris.length) {
-                    this.toast('文件里没有 otpauth 链接')
-                    return
-                }
-                let added = 0
-                let skipped = 0
-                for (const uri of uris) {
-                    try {
-                        const parsed = parseOtpInput(uri)
-                        if (vault.hasDuplicate(parsed.secret)) {
-                            skipped++
-                            continue
-                        }
-                        await vault.add(parsed)
-                        added++
-                    } catch (e) {
-                        skipped++
+                let foundPath = ''
+                for (let i = 0; i < IMPORT_TEXT_CANDIDATES.length; i++) {
+                    if (await fs.exists(IMPORT_TEXT_CANDIDATES[i])) {
+                        foundPath = IMPORT_TEXT_CANDIDATES[i]
+                        break
                     }
                 }
+                let rawText = ''
+                if (foundPath) {
+                    rawText = await fs.readFile(foundPath)
+                } else {
+                    let imgPath = ''
+                    for (let i = 0; i < IMPORT_IMG_CANDIDATES.length; i++) {
+                        if (await fs.exists(IMPORT_IMG_CANDIDATES[i])) {
+                            imgPath = IMPORT_IMG_CANDIDATES[i]
+                            break
+                        }
+                    }
+                    if (!imgPath) {
+                        this.toast(`未找到 import.txt，请放入 ${FAV_DIR}/import.txt 或 ${EXPORT_DIR}/import.txt`)
+                        return
+                    }
+                    this.toast('正在解析二维码图片…')
+                    rawText = await this.importFromImage(imgPath)
+                }
+
+                const uris = extractUris(rawText)
+                if (!uris.length && !/^otpauth(?:-migration)?:\/\//i.test(String(rawText || '').trim())) {
+                    this.toast('文件里没有 otpauth 或 Google 转移链接')
+                    return
+                }
+                const candidate = uris.length ? uris.join('\n') : String(rawText || '').trim()
+                const parsed = parseOtpInputs(candidate)
+                const { added, skipped } = await vault.addMany(parsed.accounts)
                 this.importHint = `导入 ${added} 个，跳过 ${skipped} 个`
                 this.toast(`导入完成：新增 ${added} 个，跳过 ${skipped} 个`)
             } catch (e) {
@@ -307,7 +481,7 @@ export default {
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 2px;
+    padding: 5px 2px;
 }
 
 .item-text {
@@ -341,6 +515,108 @@ export default {
 .chev {
     font-size: 16px;
     color: #c4c7cc;
+}
+
+.qr-mask {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    background-color: rgba(22, 24, 28, 0.65);
+    align-items: center;
+    justify-content: center;
+}
+
+.qr-box {
+    width: 680px;
+    height: 230px;
+    background-color: #ffffff;
+    border-radius: 14px;
+    padding: 12px;
+    flex-direction: row;
+}
+
+.qr-left {
+    width: 206px;
+    height: 206px;
+    background-color: #ffffff;
+    border-width: 1px;
+    border-color: #e6e8eb;
+    border-radius: 8px;
+    align-items: center;
+    justify-content: center;
+    margin-right: 14px;
+}
+
+.qr-img {
+    width: 196px;
+    height: 196px;
+}
+
+.qr-right {
+    flex: 1;
+    flex-direction: column;
+}
+
+.qr-flag {
+    font-size: 11px;
+    color: #0f9d58;
+}
+
+.qr-title {
+    font-size: 14px;
+    color: #1b1c1e;
+    font-weight: bold;
+    margin-top: 2px;
+}
+
+.qr-sub {
+    font-size: 11px;
+    color: #5f6368;
+    margin-top: 4px;
+}
+
+.qr-list {
+    flex: 1;
+    margin-top: 4px;
+    margin-bottom: 6px;
+    background-color: #f8f9fa;
+    border-radius: 6px;
+}
+
+.qr-list-inner {
+    flex-direction: column;
+    padding: 4px 8px;
+}
+
+.qr-acc {
+    font-size: 12px;
+    color: #1b1c1e;
+    margin-bottom: 2px;
+}
+
+.qr-actions {
+    flex-direction: row;
+    justify-content: flex-end;
+}
+
+.qr-btn {
+    font-size: 12px;
+    color: #5f6368;
+    background-color: #f1f3f4;
+    padding: 6px 14px;
+    border-radius: 14px;
+    margin-left: 8px;
+}
+
+.qr-btn-primary {
+    font-size: 12px;
+    color: #ffffff;
+    background-color: #1a73e8;
+    padding: 6px 14px;
+    border-radius: 14px;
+    margin-left: 8px;
 }
 
 .pin-mask {

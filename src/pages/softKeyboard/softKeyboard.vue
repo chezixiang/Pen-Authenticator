@@ -14,7 +14,7 @@
                     v-for="key in row"
                     :key="key"
                     class="kb-key"
-                    :class="{ 'kb-accent': key === '完成', 'kb-wide': key === '空格' || key === '完成' || key === '←' || key === '123' || key === 'ABC' }"
+                    :class="{ 'kb-accent': key === '完成', 'kb-wide': key === '空格' || key === '完成' || key === '←' || key === '123' || key === 'ABC' || key === '大写' || key === '小写' }"
                     @click="press(key)"
                 >{{ key }}</text>
             </div>
@@ -33,7 +33,7 @@ const LETTER_ROWS = [
 
 const NUM_ROWS = [
     ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
-    ['-', '_', '.', '@', '/', ':', '+', '=', '~', '%'],
+    ['-', '_', '.', '@', '/', ':', '?', '=', '+', '%'],
     ['(', ')', '[', ']', '{', '}', '"', "'", '#', '&']
 ]
 
@@ -45,14 +45,20 @@ export default {
             title: '编辑',
             mode: 'text',
             numeric: false,
+            upper: false,
             sessionId: null,
             sessionSettled: true
         }
     },
     computed: {
         rows() {
-            const base = this.numeric ? NUM_ROWS : LETTER_ROWS
-            const control = [this.numeric ? 'ABC' : '123', '空格', '←', '完成']
+            let base = this.numeric ? NUM_ROWS : LETTER_ROWS
+            if (!this.numeric && (this.upper || this.mode === 'secret')) {
+                base = LETTER_ROWS.map(row => row.map(ch => /^[a-z]$/.test(ch) ? ch.toUpperCase() : ch))
+            }
+            const control = this.numeric
+                ? ['ABC', '空格', '←', '完成']
+                : ['123', (this.upper || this.mode === 'secret') ? '小写' : '大写', '空格', '←', '完成']
             return base.concat([control])
         },
         displayValue() {
@@ -89,6 +95,7 @@ export default {
             this.title = options.title || (options.mode === 'secret' ? 'Base32 密钥' : options.mode === 'digits' ? '数字' : '编辑')
             this.mode = options.mode || 'text'
             this.numeric = this.mode === 'digits'
+            this.upper = this.mode === 'secret'
             this.value = options.data || ''
         },
         cancel() {
@@ -111,9 +118,13 @@ export default {
                 this.numeric = true
             } else if (key === 'ABC') {
                 this.numeric = false
+            } else if (key === '大写') {
+                this.upper = true
+            } else if (key === '小写') {
+                this.upper = false
             } else {
                 let text = key
-                if (this.mode === 'secret') text = text.toUpperCase()
+                if (this.mode === 'secret' || this.upper) text = text.toUpperCase()
                 if (this.mode === 'digits' && !/^[0-9]$/.test(key)) return
                 this.value = this.value + text
             }
@@ -203,7 +214,7 @@ export default {
 }
 
 .kb-wide {
-    flex: 1.6;
+    flex: 1.5;
     font-size: 14px;
 }
 

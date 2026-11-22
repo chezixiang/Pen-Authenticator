@@ -4,15 +4,25 @@
 // 依赖：C:/Users/Aquavie/.workbuddy/binaries/node/workspace/node_modules/qrcode
 import { createRequire } from 'module'
 import { decodeQr, grayToBits } from '../src/lib/qrdec.js'
+import { encodeQr } from '../src/lib/qrenc.js'
 
 const require = createRequire(import.meta.url)
-const QRCode = require(process.env.QRCODE_PATH ||
-    'C:/Users/Aquavie/.workbuddy/binaries/node/workspace/node_modules/qrcode')
+let QRCode = null
+try {
+    QRCode = require(process.env.QRCODE_PATH ||
+        'C:/Users/Aquavie/.workbuddy/binaries/node/workspace/node_modules/qrcode')
+} catch (e) {
+    QRCode = null
+}
 
 const EC_LEVELS = ['L', 'M', 'Q', 'H']
 
 // ---------- 把 payload 编成模块矩阵 ----------
 function moduleMatrix(text, ecLevel) {
+    if (!QRCode) {
+        const q = encodeQr(text, ecLevel)
+        return { size: q.size, data: q.data }
+    }
     const qr = QRCode.create(text, { errorCorrectionLevel: ecLevel })
     const size = qr.modules.size
     const data = qr.modules.data
@@ -144,6 +154,7 @@ const PAYLOADS = [
     'otpauth://totp/GitHub:alice@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&algorithm=SHA1&digits=6&period=30',
     'otpauth://totp/Google:someuser@gmail.com?secret=KRSXG5CTMVRXEZLU&issuer=Google',
     'otpauth://totp/ACME%20Co:john.doe@email.com?secret=HXDMVJECJJWSRB3HWIZR4IFUGFTMXBOZ&issuer=ACME%20Co&algorithm=SHA256&digits=8&period=60',
+    'otpauth-migration://offline?data=CjEKCkhlbGxvId6tvu8SGEV4YW1wbGU6YWxpY2VAZ29vZ2xlLmNvbRoHRXhhbXBsZTAC',
     'https://example.com/short',
     'HELLO WORLD 123'
 ]

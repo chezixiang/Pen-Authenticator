@@ -2,10 +2,10 @@
     <div class="page">
         <div class="bar">
             <text class="back" @click="close">‹ 返回</text>
-            <text class="bar-title">{{ isEdit ? '编辑账号' : '添加账号' }}</text>
+            <text class="bar-title">{{ isEdit ? '编辑账号' : (migrationBatch.length > 1 ? '批量导入 (' + migrationBatch.length + ')' : '添加账号') }}</text>
             <div class="bar-actions">
                 <text class="ghost-btn" @click="close">取消</text>
-                <text class="primary-btn" @click="save">保存</text>
+                <text class="primary-btn" @click="save">{{ migrationBatch.length > 1 ? '批量保存' : '保存' }}</text>
             </div>
         </div>
 
@@ -71,7 +71,7 @@
 <script>
 import { vault } from '../../lib/vault.js'
 import { openSoftKeyboard } from '@dictpen/core'
-import { parseOtpInput, buildOtpUri } from '../../lib/otpauth.js'
+import { parseOtpInputs, buildOtpUri } from '../../lib/otpauth.js'
 import { validateSecret, normalizeSecret } from '../../lib/base32.js'
 import { totpFromSecret, formatCode } from '../../lib/totp.js'
 
@@ -90,6 +90,7 @@ export default {
                 period: 30,
                 counter: 0
             },
+            migrationBatch: [],
             algorithms: ['SHA1', 'SHA256', 'SHA512'],
             banner: '',
             previewCode: '······'
@@ -106,8 +107,11 @@ export default {
             return secret.slice(0, 4) + ' ···· ' + secret.slice(-4)
         },
         uriHint() {
-            if (this.form.secret) return buildOtpUri(this.form).slice(0, 46) + '…'
-            return '粘贴 otpauth:// 链接可自动识别'
+            if (this.migrationBatch.length > 1) {
+                return `Google 转移链接（共 ${this.migrationBatch.length} 个账号）`
+            }
+            if (this.form.secret) return buildOtpUri(this.form).slice(0, 44) + '…'
+            return '粘贴 otpauth:// 或 Google 转移链接'
         }
     },
     mounted() {
@@ -161,13 +165,12 @@ export default {
             }
         },
         editField(name) {
-            const options = name === 'secret'
-                ? { mode: 'secret', title: 'Base32 密钥' }
-                : { mode: 'text', title: name === 'issuer' ? '服务名' : '账号名' }
             openSoftKeyboard(
                 () => this.form[name],
                 value => {
                     this.form[name] = name === 'secret' ? normalizeSecret(value) : value
+                    if (name === 'secret') this.migrationBatch = []
+                    else if (this.migrationBatch.length > 0) this.migrationBatch[0][name] = value
                     this.refreshPreview()
                 }
             )
@@ -179,7 +182,7 @@ export default {
                 value => {
                     if (!value) return ''
                     try {
-                        parseOtpInput(value)
+                        parseOtpInputs(value)
                         return ''
                     } catch (e) {
                         return '链接无法解析：' + e.message
@@ -190,10 +193,18 @@ export default {
         applyUri(value) {
             if (!value) return
             try {
-                const parsed = parseOtpInput(value)
-                this.form = Object.assign({}, this.form, parsed)
+                const res = parseOtpInputs(value)
+                const first = res.accounts[0]
+                this.form = Object.assign({}, this.form, first)
                 this.refreshPreview()
-                this.setBanner('已从链接解析：' + (parsed.issuer || parsed.account || '未知服务'))
+                if (!this.isEdit && res.accounts.length > 1) {
+                    this.migrationBatch = res.accounts
+                    this.setBanner(`已解析 Google 转移链接（共 ${res.accounts.length} 个账号），点「批量保存」全部导入`)
+                } else {
+                    this.migrationBatch = []
+                    const prefix = res.isMigration ? '已从 Google 转移链接解析：' : '已从链接解析：'
+                    this.setBanner(prefix + (first.issuer || first.account || '未知服务'))
+                }
             } catch (e) {
                 this.setBanner('解析失败：' + e.message)
                 return
@@ -204,6 +215,20 @@ export default {
             if (type === 'hotp' && this.form.algorithm === 'SHA512') this.form.algorithm = 'SHA1'
         },
         async save() {
+            if (!this.isEdit && this.migrationBatch.length > 1) {
+                try {
+                    const { added, skipped } = await vault.addMany(this.migrationBatch)
+                    if (added === 0) {
+                        this.setBanner(`转移链接中的 ${skipped} 个账号均已存在`)
+                        return
+                    }
+                    this.close()
+                    return
+                } catch (e) {
+                    this.setBanner('批量保存失败：' + e.message)
+                    return
+                }
+            }
             const secret = normalizeSecret(this.form.secret)
             const err = validateSecret(secret)
             if (err) {
@@ -289,7 +314,7 @@ export default {
 
 .bar-actions {
     flex-direction: row;
-    width: 140px;
+    width: 150px;
     justify-content: flex-end;
 }
 

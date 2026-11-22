@@ -814,7 +814,7 @@ export function decodeQr(img) {
     const cands = findFinderCenters(bit, img.data, img.stride, w, h, inv)
     if (cands.length < 3) return null
 
-    const top = cands.slice(0, 4)
+    const top = cands.slice(0, 6)
     let best = null
     for (let a = 0; a < top.length - 2; a++) {
         for (let b = a + 1; b < top.length - 1; b++) {

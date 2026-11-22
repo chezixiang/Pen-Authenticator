@@ -223,6 +223,43 @@ export const vault = {
         return account
     },
 
+    /** 批量添加账号（自动跳过重复密钥，仅执行一次持久化写入） */
+    async addMany(items) {
+        if (!Array.isArray(items) || !items.length) {
+            return { added: 0, skipped: 0, accounts: [] }
+        }
+        let added = 0
+        let skipped = 0
+        const created = []
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i]
+            if (!item || !item.secret || this.hasDuplicate(item.secret)) {
+                skipped++
+                continue
+            }
+            const account = {
+                id: randomId() + '_' + i,
+                issuer: item.issuer || '',
+                account: item.account || '',
+                secret: item.secret,
+                type: item.type === 'hotp' ? 'hotp' : 'totp',
+                algorithm: item.algorithm || 'SHA1',
+                digits: Number(item.digits) || 6,
+                period: Number(item.period) || 30,
+                counter: Number(item.counter) || 0,
+                note: item.note || '',
+                createdAt: Date.now()
+            }
+            this.accounts.push(account)
+            created.push(account)
+            added++
+        }
+        if (added > 0) {
+            await this.persist()
+        }
+        return { added, skipped, accounts: created }
+    },
+
     async update(id, patch) {
         const idx = this.accounts.findIndex(a => a.id === id)
         if (idx < 0) throw new Error('账号不存在')

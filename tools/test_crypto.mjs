@@ -4,7 +4,12 @@ import { sha1, sha256, sha512, hmac, pbkdf2 } from '../src/lib/hash.js'
 import { aesCbcEncrypt, aesCbcDecrypt } from '../src/lib/aes.js'
 import { base32Decode, base32Encode } from '../src/lib/base32.js'
 import { totpFromSecret, formatCode, verify } from '../src/lib/totp.js'
-import { parseOtpInput, buildOtpUri } from '../src/lib/otpauth.js'
+import {
+  parseOtpInput, parseOtpInputs, buildOtpUri, extractUris,
+  isMigrationUri, parseMigrationUri, buildMigrationUri, buildMigrationUris
+} from '../src/lib/otpauth.js'
+import { encodeQr, matrixToPngBytes, qrToPngBase64 } from '../src/lib/qrenc.js'
+import { decodeQr } from '../src/lib/qrdec.js'
 import { utf8, bytesToHex, hexToBytes, bytesToBase64, base64ToBytes, utf8Decode } from '../src/lib/bytes.js'
 
 let pass = 0
@@ -147,6 +152,98 @@ for (const [t, s1, s256, s512] of vectors) {
 check('format 6', formatCode('123456'), '123 456')
 check('format 8', formatCode('12345678'), '1234 5678')
 check('verify ok', verify(totpFromSecret('JBSWY3DPEHPK3PXP', {}, Date.now()).code, 'JBSWY3DPEHPK3PXP'), true)
+
+// ---------- Google Authenticator 2FA 转移 (otpauth-migration://) ----------
+{
+  // 1. 真实 Google Authenticator 迁移测试向量（secret = "Hello!\xde\xad\xbe\xef" -> JBSWY3DPEHPK3PXP）
+  const realUri = 'otpauth-migration://offline?data=CjEKCkhlbGxvId6tvu8SGEV4YW1wbGU6YWxpY2VAZ29vZ2xlLmNvbRoHRXhhbXBsZTAC'
+  check('isMigrationUri true', isMigrationUri(realUri), true)
+  check('isMigrationUri false', isMigrationUri('otpauth://totp/x?secret=JBSWY3DPEHPK3PXP'), false)
+  const parsedReal = parseMigrationUri(realUri)
+  check('real mig count', parsedReal.accounts.length, 1)
+  check('real mig issuer', parsedReal.accounts[0].issuer, 'Example')
+  check('real mig account', parsedReal.accounts[0].account, 'alice@google.com')
+  check('real mig secret', parsedReal.accounts[0].secret, 'JBSWY3DPEHPK3PXP')
+  check('real mig type', parsedReal.accounts[0].type, 'totp')
+
+  // parseOtpInput 兼容单条返回
+  const singleCompat = parseOtpInput(realUri)
+  check('parseOtpInput mig compat', singleCompat.secret, 'JBSWY3DPEHPK3PXP')
+
+  // 2. 多账号 + SHA256/SHA512 + 8位 + HOTP counter + 负数 batch_id (10字节 varint) 往返
+  const sampleAccounts = [
+    { issuer: 'GitHub', account: 'alice@example.com', secret: 'JBSWY3DPEHPK3PXP', type: 'totp', algorithm: 'SHA1', digits: 6, period: 30, counter: 0 },
+    { issuer: 'Google', account: '中文@gmail.com', secret: 'HXDMVJECJJWSRB3HWIZR4IFUGFTMXBOZ', type: 'totp', algorithm: 'SHA256', digits: 8, period: 30, counter: 0 },
+    { issuer: 'Steam', account: 'gamer', secret: 'KRSXG5CTMVRXEZLU', type: 'hotp', algorithm: 'SHA512', digits: 6, period: 30, counter: 42 }
+  ]
+  const migUri = buildMigrationUri(sampleAccounts, { version: 1, batchSize: 3, batchIndex: 1, batchId: -123456789 })
+  const decoded = parseMigrationUri(migUri)
+  check('mig multi count', decoded.accounts.length, 3)
+  check('mig batchSize', decoded.batchSize, 3)
+  check('mig batchIndex', decoded.batchIndex, 1)
+  check('mig negative batchId', decoded.batchId, -123456789)
+  check('mig acc0 issuer', decoded.accounts[0].issuer, 'GitHub')
+  check('mig acc0 account', decoded.accounts[0].account, 'alice@example.com')
+  check('mig acc0 secret', decoded.accounts[0].secret, 'JBSWY3DPEHPK3PXP')
+  check('mig acc1 issuer', decoded.accounts[1].issuer, 'Google')
+  check('mig acc1 account', decoded.accounts[1].account, '中文@gmail.com')
+  check('mig acc1 alg', decoded.accounts[1].algorithm, 'SHA256')
+  check('mig acc1 digits', decoded.accounts[1].digits, 8)
+  check('mig acc2 type', decoded.accounts[2].type, 'hotp')
+  check('mig acc2 alg', decoded.accounts[2].algorithm, 'SHA512')
+  check('mig acc2 counter', decoded.accounts[2].counter, 42)
+
+  // 3. URL-safe Base64 / 无 = 填充 / + 转空格 兼容
+  const rawB64 = decodeURIComponent(migUri.split('data=')[1])
+  const urlSafeNoPad = 'otpauth-migration://offline?data=' + rawB64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  check('mig urlsafe no-pad count', parseMigrationUri(urlSafeNoPad).accounts.length, 3)
+  const spacePlus = 'otpauth-migration://offline?data=' + rawB64.replace(/\+/g, ' ')
+  check('mig space-plus count', parseMigrationUri(spacePlus).accounts.length, 3)
+
+  // 4. 分批构建 buildMigrationUris & extractUris & parseOtpInputs
+  const batches = buildMigrationUris(sampleAccounts, 2, 98765)
+  check('mig batches len', batches.length, 2)
+  const b0 = parseMigrationUri(batches[0])
+  const b1 = parseMigrationUri(batches[1])
+  check('mig b0 size/idx/count', `${b0.batchSize}/${b0.batchIndex}/${b0.accounts.length}`, '2/0/2')
+  check('mig b1 size/idx/count', `${b1.batchSize}/${b1.batchIndex}/${b1.accounts.length}`, '2/1/1')
+
+  const mixedText = [
+    '# 备份文件（混合 otpauth 与 Google 迁移链接）',
+    batches[0],
+    'otpauth://totp/Cloudflare:ops@cf.com?secret=JBSWY3DPEHPK3PXP&issuer=Cloudflare',
+    batches[1]
+  ].join('\n')
+  const extracted = extractUris(mixedText)
+  check('extractUris mixed count', extracted.length, 3)
+  const allParsed = parseOtpInputs(mixedText)
+  check('parseOtpInputs mixed total accounts', allParsed.accounts.length, 4)
+
+  // 5. 纯 JS 二维码编码 (qrenc) -> 解码 (qrdec) 闭环 + PNG 生成验证
+  for (const ec of ['L', 'M', 'Q', 'H']) {
+    const qr = encodeQr(batches[0], ec)
+    // 将模块矩阵渲染为 1-bit 位图供 decodeQr 识别
+    const scale = 4
+    const quiet = 4
+    const side = (qr.size + quiet * 2) * scale
+    const stride = (side + 7) >> 3
+    const bits = new Uint8Array(stride * side)
+    for (let y = 0; y < side; y++) {
+      const my = Math.floor(y / scale) - quiet
+      for (let x = 0; x < side; x++) {
+        const mx = Math.floor(x / scale) - quiet
+        if (mx >= 0 && mx < qr.size && my >= 0 && my < qr.size && qr.data[my * qr.size + mx]) {
+          bits[y * stride + (x >> 3)] |= 1 << (7 - (x & 7))
+        }
+      }
+    }
+    const dec = decodeQr({ data: bits, width: side, height: side, stride, dark: 1 })
+    check(`qrenc->qrdec mig ec=${ec}`, dec ? dec.text : 'null', batches[0])
+  }
+  const pngBytes = matrixToPngBytes(encodeQr(batches[0], 'M'), { targetSize: 200 })
+  check('png magic', bytesToHex(pngBytes.subarray(0, 8)), '89504e470d0a1a0a')
+  check('qrToPngBase64 non-empty', qrToPngBase64(batches[0]).length > 100, true)
+}
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

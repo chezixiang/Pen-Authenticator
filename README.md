@@ -1,4 +1,7 @@
 # 验证器 Authenticator（有道词典笔 X7P）
+# 未验证
+项目基于https://github.com/chezixiang/Pen-Authenticator 使用ai进行修改，
+主要为适配Google的F2A转移功能
 
 给有道词典笔写的两步验证（TOTP/HOTP）小程序：多账号管理、扫码/手动导入、可选 PIN 加密。
 基于上级目录 `classic_sdk` 的有道小程序 SDK 构建。
@@ -13,11 +16,12 @@
 | --- | --- |
 | 账号列表 | 左侧列表 + 右侧大号验证码，936×280 横屏布局，列表内直接显示各账号当前码 |
 | 验证码 | TOTP（30/60s，6/8 位）与 HOTP，支持 SHA1/SHA256/SHA512；进度条按剩余秒数变色 |
-| 添加账号 | 扫码添加 / 手动输入 / 粘贴 otpauth 链接（自动解析 issuer、算法、位数、周期） |
+| 添加账号 | 扫码添加 / 手动输入 / 粘贴 `otpauth://` 或 `otpauth-migration://` 链接（自动解析 issuer、算法、位数、周期） |
+| Google 2FA 转移 | 完整适配 Google Authenticator「转移账号」(`otpauth-migration://offline?data=`) Protobuf 协议：支持单码多账号批量扫码导入、多张二维码分批连续扫入，以及在设置页直接生成 Google 转移二维码供手机扫码转出 |
 | 多账号管理 | 选择、编辑、二次确认删除、HOTP 计数递增、重复密钥检测 |
-| 本地加密 | 可选 6 位 PIN：PBKDF2-HMAC-SHA256(12000) 派生，AES-256-CBC 加密 + HMAC-SHA256 校验（encrypt-then-MAC） |
-| 备份 | 导出 otpauth 链接到 `/userdisk/Authenticator/backup-*.txt`；从 `/userdisk/Authenticator/import.txt` 批量导入 |
-| 输入法 | 自绘全键盘（字母/数字符号切换、Base32 大小写自动纠正），不依赖系统输入法 |
+| 本地加密 | 可选 6 位 PIN：PBKDF2-HMAC-SHA256 派生，AES-256-CBC 加密 + HMAC-SHA256 校验（encrypt-then-MAC） |
+| 备份与互传 | 导出 `backup-*.txt` (`otpauth://`) 与 `migration-*.txt` (`otpauth-migration://`) 到 `/userdisk/Authenticator/` 及 `/userdisk/Favorite/Authenticator/`（MTP / 8080 文件互传直接可见）；支持从 `import.txt` 或二维码图片 (`import.png`/`import.jpg`) 批量导入 |
+| 输入法 | 自绘全键盘（字母大小写切换、数字符号含 `?`、Base32 大小写自动纠正），不依赖系统输入法 |
 
 ## 安装到词典笔
 
@@ -151,21 +155,22 @@ src/lib/hash.js      SHA1/SHA256/SHA512 + HMAC + PBKDF2（SHA-512 用 32 位双�
 src/lib/aes.js       AES-256-CBC + PKCS#7（S 盒运行时由 GF(2^8) 逆元生成）
 src/lib/totp.js      HOTP/TOTP、验证码分组显示
 src/lib/base32.js    Base32（RFC 4648）编解码与校验
-src/lib/otpauth.js   otpauth:// 解析/生成、批量提取
-src/lib/vault.js     账号存储 + PIN 加密 + 增删改查
+src/lib/otpauth.js   otpauth:// 与 Google 转移 (otpauth-migration://) Protobuf 解析/生成、批量提取
+src/lib/qrenc.js     纯 JS 二维码编码器 + 1-bit PNG 生成器（用于设置页屏幕显示 Google 转移二维码）
+src/lib/vault.js     账号存储 + PIN 加密 + 增删改查 + 批量原子导入 (addMany)
 src/lib/random.js    盐/IV 随机源（时间+计数器+Math.random 混入 SHA-256 池）
 src/lib/qrdec.js     二维码解码器（1-bit 输入：finder/单应采样/RS 纠错/模式解析）
 src/lib/camera.js    取景管线（gst 双分支脚本模板 + 常量）
 src/lib/bytes.js     base64/UTF-8 编解码（QuickJS 上查表实现，逐字符 indexOf 会秒级卡顿）
 src/pages/*          首页/扫码/编辑/设置/解锁/键盘
-tools/               设备 SSH 调试脚本、密码学/解码器自测、常量生成器
+tools/               设备调试脚本、ydpen-toolkit 部署与 fs 插件注入 (ydpen_deploy.py)、密码学/解码器自测
 ```
 
 ## 自测
 
 ```bash
-node --experimental-default-type=module tools/test_crypto.mjs
-node --experimental-default-type=module tools/test_qrdec.mjs
+node tools/test_crypto.mjs
+node tools/test_qrdec.mjs
 ```
 
 ## 许可证

@@ -47,7 +47,7 @@ export function validateSecret(input) {
     const clean = normalizeSecret(input)
     if (!clean) return '密钥不能为空'
     if (!/^[A-Z2-7]+$/.test(clean)) return '密钥只能包含 A-Z 与 2-7'
-    if (clean.length < 16) return '密钥至少 16 位（建议 32 位）'
+    if (clean.length < 8) return '密钥至少 8 位（建议 16 或 32 位）'
     try {
         base32Decode(clean)
     } catch (e) {

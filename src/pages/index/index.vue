@@ -71,8 +71,8 @@
                 <div v-else class="welcome">
                     <text class="welcome-title">双因素验证器</text>
                     <text class="welcome-line">· 支持 TOTP / HOTP，SHA1 / SHA256 / SHA512</text>
-                    <text class="welcome-line">· 扫码或手动导入 otpauth 链接</text>
-                    <text class="welcome-line">· 可在设置里开启 PIN 加密保护</text>
+                    <text class="welcome-line">· 支持扫码/导入 otpauth 与 Google 验证器转移码</text>
+                    <text class="welcome-line">· 可在设置里开启 PIN 加密保护或导出转移码</text>
                     <div class="welcome-actions">
                         <text class="primary" @click="goScan">扫描二维码</text>
                         <text class="secondary" @click="goEdit">手动输入</text>
